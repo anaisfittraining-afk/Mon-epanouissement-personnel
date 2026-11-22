@@ -7,7 +7,7 @@
 // garder une ancienne version en mémoire même après une mise à jour publiée sur GitHub. Ce petit
 // script détecte tout seul qu'une nouvelle version est arrivée (en comparant MEP_BUILD_VERSION à la
 // dernière valeur vue sur cet appareil) et force un rechargement complet, sans cache, une seule fois.
-window.MEP_BUILD_VERSION = '2026-11-22-ronds1';
+window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
 (function() {
   try {
     var KEY = 'mep_build_seen_v1';
@@ -5966,6 +5966,11 @@ window.MEP_BUILD_VERSION = '2026-11-22-ronds1';
   // ── Raccourci « co-NAÎTRE son foyer » : visible seulement quand le tableau de bord a réglé le foyer de cette cliente.
   // Foyer activé → ouvre l'appli foyer ; sinon → explication de l'extension (même page que l'onglet Alimentation).
   function accFoyerGo() {
+    // Foyer activé : on ouvre directement l'appli (comme « en mouvement »), sans repasser par une page intermédiaire.
+    if (FOYER_INFO && FOYER_INFO.active && FOYER_INFO.url) {
+      var a = document.createElement('a'); a.href = foyerUrl('home'); a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      return;
+    }
     window.__extWhich = 'foyer'; showView('extension', null); window.scrollTo(0, 0);
   }
   function mouvGateOn() { return !!(MOUV_INFO && typeof MOUV_INFO.active === 'boolean'); }
