@@ -7,7 +7,7 @@
 // garder une ancienne version en mémoire même après une mise à jour publiée sur GitHub. Ce petit
 // script détecte tout seul qu'une nouvelle version est arrivée (en comparant MEP_BUILD_VERSION à la
 // dernière valeur vue sur cet appareil) et force un rechargement complet, sans cache, une seule fois.
-window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
+window.MEP_BUILD_VERSION = '2026-11-23-photo1';
 (function() {
   try {
     var KEY = 'mep_build_seen_v1';
@@ -3242,9 +3242,33 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
         if (!tok) throw new Error('no token');
         try { localStorage.setItem(pushLsKey('push_tok_v1'), tok); localStorage.setItem(pushLsKey('push_on_v1'), '1'); } catch (e) {}
         return fbDB.ref(pushTokenPath(tok)).set({ t: tok, at: firebase.database.ServerValue.TIMESTAMP, ua: String(navigator.userAgent || '').slice(0, 90), remind: pushRemindOn(), lastOpen: pushToday() });
-      }).then(function() { PUSH_MSG = '✅ Notifications activées.'; pushRefresh(); })
+      }).then(function() { pushFlagMeta(true); pushForeground(); PUSH_MSG = '✅ Notifications activées.'; pushRefresh(); })
       .catch(function(e) { if (e === 'denied') return; PUSH_MSG = '⚠️ Activation impossible pour le moment. Réessaie dans un instant.'; pushRefresh(); });
   }
+  // Signale à Anaïs (tableau de bord) que cette cliente a bien activé les notifications, et affiche aussi une notification quand l'appli est ouverte.
+  function pushFlagMeta(on) {
+    try {
+      if (!CLIENT_CODE || !fbDB || PREVIEW_MODE) return;
+      var r = fbDB.ref('epanouissement_global/messagerie/' + CLIENT_CODE + '/meta/push');
+      if (on) r.set({ on: true, at: firebase.database.ServerValue.TIMESTAMP, os: pushIsIos() ? 'iPhone' : (/android/i.test(navigator.userAgent || '') ? 'Android' : 'Autre') }).catch(function() {});
+      else r.remove().catch(function() {});
+    } catch (e) {}
+  }
+  var PUSH_FG = false;
+  function pushForeground() {
+    try {
+      if (PUSH_FG || pushState() !== 'on') return; PUSH_FG = true;
+      pushLoadSdk().then(function() {
+        firebase.messaging().onMessage(function(payload) {
+          var d = (payload && payload.data) || {};
+          navigator.serviceWorker.ready.then(function(reg) {
+            return reg.showNotification(d.title || 'Mon espace co-NAÎTRE', { body: d.body || 'Tu as un nouveau message.', icon: 'icon-192.png', badge: 'icon-192.png', tag: d.tag || 'message', renotify: true, silent: false, vibrate: [200, 100, 200, 100, 200], data: { url: d.url || reg.scope } });
+          }).catch(function() {});
+        });
+      }).catch(function() { PUSH_FG = false; });
+    } catch (e) { PUSH_FG = false; }
+  }
+  setTimeout(function() { try { if (pushState() === 'on') { pushForeground(); pushFlagMeta(true); } } catch (e) {} }, 5000);
   function pushSetRemind(on) {
     try { localStorage.setItem(pushLsKey('push_remind_v1'), on ? '1' : '0'); } catch (e) {}
     var tok = ''; try { tok = localStorage.getItem(pushLsKey('push_tok_v1')) || ''; } catch (e) {}
@@ -3266,6 +3290,7 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
     PUSH_MSG = 'Notifications désactivées.';
     var p = Promise.resolve();
     try { if (tok && fbDB) p = fbDB.ref(pushTokenPath(tok)).remove(); } catch (e) {}
+    pushFlagMeta(false);
     p.catch(function() {}).then(function() { return window.firebase && firebase.messaging ? firebase.messaging().deleteToken() : null; }).catch(function() {}).then(pushRefresh);
   }
 
@@ -5651,6 +5676,8 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
     var w = jourSportWeekKey();
     var week = getJourWeekly(w);
     week.sport[idx] = !week.sport[idx];
+    if (!week.sportDates) week.sportDates = [];
+    week.sportDates[idx] = week.sport[idx] ? jourActiveDate() : null; // sert au bilan du jour : sport fait ou non CE jour-là
     saveJourWeekly(w, week);
     renderAujourdhui();
   }
@@ -5676,6 +5703,7 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
     if (week.sport.length <= 1) return;
     week.sport.splice(idx, 1);
     week.sportLabels.splice(idx, 1);
+    if (week.sportDates) week.sportDates.splice(idx, 1);
     saveJourWeekly(w, week);
     renderAujourdhui();
   }
@@ -5805,7 +5833,7 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
   function msgList() {
     var m = (MSG_THREAD && MSG_THREAD.msgs) || {};
     return Object.keys(m).map(function(k) { var x = m[k] || {}; x._id = k; return x; })
-      .filter(function(x) { return x.text; }).sort(function(a, b) { return (a.ts || 0) - (b.ts || 0); });
+      .filter(function(x) { return x.text || x.photo; }).map(function(x) { if (!x.text) { x.text = '📷 Photo'; x._photoOnly = true; } return x; }).sort(function(a, b) { return (a.ts || 0) - (b.ts || 0); });
   }
   function msgUnread() {
     var rd = (MSG_THREAD && MSG_THREAD.meta && MSG_THREAD.meta.clientReadTs) || 0;
@@ -5833,6 +5861,55 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
     return '<div class="card" style="cursor:pointer" onclick="showView(\'urgent\', null)"><h3>' + bdImg('rdv_urgent') + ' RDV urgent</h3>' +
       '<p class="card-sub" style="margin:0">Besoin de parler à ta coach rapidement</p></div>';
   }
+  // ── 📷 Photos dans la messagerie : la photo est réduite sur le téléphone (≈ 1280 px, JPEG) puis rangée à part,
+  // sur epanouissement_global/messagerie_photos/<code>/<id du message> ; le message porte seulement photo:true.
+  var MSG_PHOTOS = {}, MSG_PHOTO_REQ = {}, MSG_PENDING_PHOTO = null;
+  function msgPhotoPath(id) { return 'epanouissement_global/messagerie_photos/' + CLIENT_CODE + '/' + id; }
+  function msgPhotoHtml(id) {
+    var src = MSG_PHOTOS[id];
+    if (!src) {
+      if (!MSG_PHOTO_REQ[id] && fbDB && CLIENT_CODE) {
+        MSG_PHOTO_REQ[id] = 1;
+        fbDB.ref(msgPhotoPath(id)).once('value').then(function(sn) { var v = sn.val(); MSG_PHOTOS[id] = (typeof v === 'string' && v) ? v : 'x'; msgRefresh(); }).catch(function() { MSG_PHOTO_REQ[id] = 0; });
+      }
+      return '<div style="font-size:12.5px;color:var(--muted);padding:6px 0">📷 Photo en cours de chargement…</div>';
+    }
+    if (src === 'x') return '<div style="font-size:12.5px;color:var(--muted);padding:6px 0">📷 Photo indisponible</div>';
+    return '<img src="' + src + '" alt="Photo" onclick="msgPhotoOpen(' + "'" + id + "'" + ')" style="display:block;max-width:100%;max-height:230px;border-radius:10px;margin:0 0 6px;cursor:zoom-in">';
+  }
+  function msgPhotoOpen(id) {
+    var src = MSG_PHOTOS[id]; if (!src || src === 'x') return;
+    var o = document.createElement('div'); o.id = 'msgPhotoBig';
+    o.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:99999;display:flex;align-items:center;justify-content:center;padding:14px';
+    o.onclick = function() { o.remove(); };
+    o.innerHTML = '<img src="' + src + '" style="max-width:100%;max-height:100%;border-radius:8px"><button type="button" style="position:absolute;top:14px;right:14px;background:#fff;border:0;border-radius:20px;padding:8px 14px;font-weight:700;cursor:pointer">Fermer</button>';
+    document.body.appendChild(o);
+  }
+  function msgPickPhoto(input) {
+    var f = input && input.files && input.files[0]; if (!f) return;
+    var st = document.getElementById('msgStatus'); if (st) st.textContent = 'Préparation de la photo…';
+    var rd = new FileReader();
+    rd.onerror = function() { if (st) st.textContent = '⚠️ Impossible de lire cette photo.'; };
+    rd.onload = function() {
+      var img = new Image();
+      img.onerror = function() { if (st) st.textContent = '⚠️ Ce format de photo n\'est pas pris en charge. Essaie avec une capture d\'écran ou une autre photo.'; };
+      img.onload = function() {
+        var max = 1280, w = img.width, h = img.height, k = Math.min(1, max / Math.max(w, h));
+        var c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
+        var ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0, c.width, c.height);
+        var q = 0.8, out = c.toDataURL('image/jpeg', q);
+        while (out.length > 330000 && q > 0.4) { q -= 0.1; out = c.toDataURL('image/jpeg', q); }
+        if (out.length > 420000) { if (st) st.textContent = '⚠️ Photo trop lourde, choisis-en une autre.'; return; }
+        MSG_PENDING_PHOTO = out; msgPhotoPreview(); if (st) st.textContent = '';
+      };
+      img.src = rd.result;
+    };
+    rd.readAsDataURL(f); try { input.value = ''; } catch (e) {}
+  }
+  function msgPhotoPreview() {
+    var el = document.getElementById('msgPhotoPrev'); if (!el) return;
+    el.innerHTML = MSG_PENDING_PHOTO ? '<div style="display:flex;align-items:center;gap:10px;margin:0 0 10px"><img src="' + MSG_PENDING_PHOTO + '" style="width:64px;height:64px;object-fit:cover;border-radius:10px"><button type="button" onclick="MSG_PENDING_PHOTO=null;msgPhotoPreview()" style="background:#fff5f5;border:1px solid #fed7d7;color:#c53030;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12.5px">Retirer</button></div>' : '';
+  }
   function msgThreadHtml() {
     var list = msgList();
     if (!list.length) return '<p class="card-sub" style="text-align:center;margin:18px 0">Aucun message pour l\'instant. Écris ton premier message ci-dessous 🌿</p>';
@@ -5842,7 +5919,8 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
       return '<div style="display:flex;justify-content:' + (mine ? 'flex-end' : 'flex-start') + ';margin:0 0 10px">' +
         '<div style="max-width:84%;padding:10px 13px;border-radius:' + (mine ? '16px 16px 4px 16px' : '16px 16px 16px 4px') + ';background:' + (mine ? '#E7EEE1' : '#FBF6EC') + ';border:1px solid ' + (mine ? '#CFE0C9' : '#E6C9AE') + '">' +
         (mine ? '' : '<div style="font-size:11px;font-weight:700;color:#B96A46;margin-bottom:2px">Anaïs</div>') +
-        '<div style="font-size:14.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word">' + esc(x.text) + '</div>' +
+        (x.photo ? msgPhotoHtml(x._id) : '') +
+        (x._photoOnly ? '' : '<div style="font-size:14.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word">' + esc(x.text) + '</div>') +
         '<div style="font-size:10.5px;color:var(--muted);margin-top:4px;text-align:right">' + esc(msgFmtDate(x.ts)) + '</div></div></div>';
     }).join('');
   }
@@ -5858,25 +5936,34 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
     out += '<p class="intro-text">Pose ta question ou partage ce que tu traverses. Anaïs te répond ici dès qu\'elle le peut — ce n\'est pas un chat en direct, et pour une urgence, utilise l\'onglet prévu pour cela.</p>';
     out += '<div class="card"><div id="msgThread" style="max-height:52vh;overflow-y:auto;padding:2px">' + msgThreadHtml() + '</div></div>';
     out += '<div class="card"><textarea id="msgInput" maxlength="2000" placeholder="Écris ton message…" style="min-height:90px"></textarea>' +
+      '<div id="msgPhotoPrev"></div>' +
+      '<label style="display:block;text-align:center;margin:0 0 8px;padding:10px;border:1.5px dashed #CFC6AE;border-radius:12px;color:#3F5D46;font-weight:700;font-size:13.5px;cursor:pointer">📷 Joindre une photo<input type="file" accept="image/*" onchange="msgPickPhoto(this)" style="display:none"></label>' +
       '<div class="btn-row"><button class="btn full" id="msgSendBtn" onclick="msgSend()">Envoyer</button></div>' +
       '<p class="card-sub" id="msgStatus" style="margin:8px 0 0">' + (PREVIEW_MODE ? 'Mode aperçu : l\'envoi est désactivé.' : '') + '</p></div>';
     el.innerHTML = out;
     var box = document.getElementById('msgThread'); if (box) box.scrollTop = box.scrollHeight;
+    msgPhotoPreview();
     msgMarkRead();
   }
   function msgSend() {
     var st = document.getElementById('msgStatus'), ta = document.getElementById('msgInput'), btn = document.getElementById('msgSendBtn');
     if (PREVIEW_MODE) { if (st) st.textContent = 'Mode aperçu : l\'envoi est désactivé.'; return; }
-    var text = ta ? ta.value.trim() : '';
-    if (!text) { if (st) st.textContent = 'Écris d\'abord ton message.'; return; }
+    var text = ta ? ta.value.trim() : '', ph = MSG_PENDING_PHOTO;
+    if (!text && !ph) { if (st) st.textContent = 'Écris d\'abord ton message ou joins une photo.'; return; }
     if (!fbDB || !CLIENT_CODE) { if (st) st.textContent = 'Connexion impossible pour le moment — réessaie dans un instant.'; return; }
     if (btn) btn.disabled = true;
     if (st) st.textContent = 'Envoi…';
     var idn = getIdentity(), name = ((idn.prenom || '') + ' ' + (idn.nom || '')).trim();
     var TS = firebase.database.ServerValue.TIMESTAMP;
     var base = msgPath();
-    fbDB.ref(base + '/msgs').push({ from: 'cliente', text: text.slice(0, 2000), ts: TS }).then(function() {
-      var meta = { lastTs: TS, lastFrom: 'cliente', lastText: text.slice(0, 140) };
+    var msgRef = fbDB.ref(base + '/msgs').push(), mid = msgRef.key;
+    var pPhoto = ph ? fbDB.ref(msgPhotoPath(mid)).set(ph).catch(function(e) { var er = new Error('photo'); er.photo = true; throw er; }) : Promise.resolve();
+    pPhoto.then(function() {
+      var payload = { from: 'cliente', text: text.slice(0, 2000), ts: TS }; if (ph) payload.photo = true;
+      return msgRef.set(payload);
+    }).then(function() {
+      if (ph) { MSG_PHOTOS[mid] = ph; MSG_PENDING_PHOTO = null; msgPhotoPreview(); }
+      var meta = { lastTs: TS, lastFrom: 'cliente', lastText: text ? text.slice(0, 140) : '📷 Photo' };
       if (name) meta.name = name;
       if (idn.email) meta.email = idn.email;
       return fbDB.ref(base + '/meta').update(meta);
@@ -5884,8 +5971,8 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
       var t2 = document.getElementById('msgInput'); if (t2) t2.value = '';
       var s2 = document.getElementById('msgStatus'); if (s2) s2.textContent = '✅ Message envoyé à Anaïs.';
       var b2 = document.getElementById('msgSendBtn'); if (b2) b2.disabled = false;
-    }).catch(function() {
-      var s2 = document.getElementById('msgStatus'); if (s2) s2.textContent = '⚠️ Message non envoyé — vérifie ta connexion et réessaie (ton texte est conservé).';
+    }).catch(function(e) {
+      var s2 = document.getElementById('msgStatus'); if (s2) s2.textContent = (e && e.photo) ? '⚠️ La photo n\'a pas pu être envoyée pour le moment — réessaie dans un instant, ou envoie ton message sans photo.' : '⚠️ Message non envoyé — vérifie ta connexion et réessaie (ton texte est conservé).';
       var b2 = document.getElementById('msgSendBtn'); if (b2) b2.disabled = false;
     });
   }
@@ -7620,11 +7707,11 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
   //  · sommeil : 7 h minimum par nuit  · hydratation : 8 verres  · cohérence : 3 fois  · vacuum : 10 répétitions
   //  · sport : 3 séances dans la semaine  · suivi du plan : moyenne de ces 6 habitudes
   // Un jour sans aucune donnée compte comme 0 (rien n'a été fait). La journée en cours n'est pas comptée.
-  function bilanWeekStats() {
+  function bilanWeekStats(opts) {
     var dailyAll = getJourDailyAll();
-    var dates = currentWeekDatesElapsed();
+    var dates = (opts && opts.dates) || currentWeekDatesElapsed();
     var n = dates.length;
-    var week = getJourWeekly(bilanSelectedWeekKey());
+    var week = getJourWeekly((opts && opts.weekKey) || bilanSelectedWeekKey());
     var alim = alimStatsForDates(dates);
     var cohSum = 0, waterSum = 0, sleepSum = 0, vacSum = 0, moods = [];
     var cohTotal = 0, waterFull = 0, sleepLogged = 0, sleepOk = 0, sleepHoursTotal = 0, vacDays = 0;
@@ -7645,14 +7732,15 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
     function toScore(r) { return Math.max(1, Math.min(10, Math.round(1 + r * 9))); }
     function pl(k, one, many) { return k + ' ' + (k > 1 ? many : one); }
     var sportCount = (week.sport || []).filter(Boolean).length;
+    var sportDayMode = !!(opts && typeof opts.sportDone === 'boolean');
     var ratios = {
-      alimentation: alim.ratio, sport: Math.min(sportCount / SPORT_TARGET, 1), cardio: avg(cohSum),
+      alimentation: alim.ratio, sport: sportDayMode ? (opts.sportDone ? 1 : 0) : Math.min(sportCount / SPORT_TARGET, 1), cardio: avg(cohSum),
       sommeil: avg(sleepSum), hydratation: avg(waterSum), vacuum: avg(vacSum)
     };
     ratios.suivi_plan = (ratios.alimentation + ratios.sport + ratios.cardio + ratios.sommeil + ratios.hydratation + ratios.vacuum) / 6;
     var scores = {
       alimentation: toScore(ratios.alimentation),
-      sport: [2, 4, 7, 10][Math.min(sportCount, 3)],
+      sport: sportDayMode ? (opts.sportDone ? 10 : 2) : [2, 4, 7, 10][Math.min(sportCount, 3)],
       cardio: toScore(ratios.cardio),
       sommeil: toScore(ratios.sommeil),
       hydratation: toScore(ratios.hydratation),
@@ -7666,7 +7754,7 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
       BILAN_AUTO_PILLARS.forEach(function(id) { details[id] = 'Pas encore de journée terminée à évaluer.'; });
     } else {
       details.alimentation = pl(alim.inPlan, 'jour', 'jours') + ' sur ' + n + ' dans le plan (1 repas « 20 % » max par jour).';
-      details.sport = pl(sportCount, 'séance', 'séances') + ' sur ' + SPORT_TARGET + ' cette semaine.';
+      details.sport = sportDayMode ? (opts.sportDone ? 'Sport fait ce jour-là.' : 'Pas de sport ce jour-là.') : pl(sportCount, 'séance', 'séances') + ' sur ' + SPORT_TARGET + ' cette semaine.';
       details.cardio = 'Cohérence faite ' + cohTotal + ' fois sur ' + (n * 3) + ' possibles.';
       details.sommeil = sleepLogged
         ? pl(sleepOk, 'nuit', 'nuits') + ' sur ' + n + ' à ' + SLEEP_TARGET_HOURS + ' h ou plus (moyenne ' + (Math.round(sleepHoursTotal / sleepLogged * 10) / 10) + ' h sur les nuits notées).'
@@ -8080,13 +8168,21 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
       el.innerHTML = '<p class="points-note" style="margin-top:0;">Aucun bilan envoyé pour l\'instant — ton historique apparaîtra ici dès que tu en généreras un.</p>';
       return;
     }
-    var out = '';
-    all.forEach(function(entry, idx) {
+    // Deux historiques distincts : bilans de la semaine et bilans du jour (jamais mélangés).
+    var out = '', grpDone = {};
+    var hasJour = all.some(function(x) { return x.scope === 'jour'; });
+    var order = [];
+    all.forEach(function(x, i) { if (x.scope !== 'jour') order.push(i); });
+    all.forEach(function(x, i) { if (x.scope === 'jour') order.push(i); });
+    order.forEach(function(idx) {
+      var entry = all[idx];
+      var grp = entry.scope === 'jour' ? 'jour' : 'semaine';
+      if (hasJour && !grpDone[grp]) { grpDone[grp] = true; out += '<h4 style="margin:' + (Object.keys(grpDone).length > 1 ? '18px' : '4px') + ' 0 6px;font-size:13px;color:#3F5D46;">' + (grp === 'jour' ? '📅 Mes bilans du jour' : '📋 Mes bilans de la semaine') + '</h4>'; }
       var open = BILAN_HISTORY_OPEN_IDX === idx;
       out += '<div class="access-row" style="flex-direction:column;align-items:stretch;">';
       out += '<div style="display:flex;align-items:center;gap:10px;">';
       out += '<div class="access-info" style="cursor:pointer;" onclick="bilanToggleHistoryEntry(' + idx + ')">';
-      out += '<div class="access-name">' + esc(entry.date) + '</div>';
+      out += '<div class="access-name">' + esc(entry.date) + (entry.scope === 'jour' ? ' · 📅 bilan du jour' : '') + '</div>';
       if (entry.scores) {
         var bits = [];
         ['alimentation', 'sport', 'moral', 'discipline'].forEach(function(k) { if (entry.scores[k] != null) bits.push(k + ' ' + entry.scores[k] + '/10'); });
@@ -8292,9 +8388,141 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
     renderBilan();
   }
 
+  // ═══════════ 📅 Bilan à la journée (option activée par la coach, fiche cliente du tableau de bord) ═══════════
+  // La coach active l'option pour UNE cliente : epanouissement/<code>/options/bilan_jour = true (lecture seule ici).
+  // Une fois activée, la page Bilan affiche « Mon bilan du jour » : mêmes scores que le bilan de la semaine, calculés
+  // sur UNE journée (aujourd'hui ou hier), + motivation + un mot. Envoi direct vers le tableau de bord de la coach
+  // (même chemin que le bilan hebdomadaire, marqué scope:'jour'). Le bilan de la semaine reste inchangé.
+  var OPT_BILAN_JOUR = false, OPT_BILAN_JOUR_LISTENING = false, BJ_DAY = 'today';
+  var BJ_STORE_KEY = nsKey('mep_bilan_jour_v1'); // { 'YYYY-MM-DD': { motivation, note, sentAt } }
+  function bjOptKey() { return nsKey('mep_opt_bilan_jour_v1'); }
+  function bilanJourLoadOpt() {
+    if (OPT_BILAN_JOUR_LISTENING) return;
+    try { OPT_BILAN_JOUR = localStorage.getItem(bjOptKey()) === '1'; } catch (e) {}
+    if (!fbDB || !CLIENT_CODE) return;
+    OPT_BILAN_JOUR_LISTENING = true;
+    try {
+      fbDB.ref('epanouissement/' + CLIENT_CODE + '/options/bilan_jour').on('value', function(sn) {
+        var on = sn.val() === true;
+        if (on === OPT_BILAN_JOUR) return;
+        OPT_BILAN_JOUR = on;
+        try { localStorage.setItem(bjOptKey(), on ? '1' : '0'); } catch (e) {}
+        var av = document.querySelector('.view.active');
+        if (av && av.id === 'view-bilan') { try { renderBilan(); } catch (e) {} }
+      });
+    } catch (e) { OPT_BILAN_JOUR_LISTENING = false; }
+  }
+  function isoDayShift(iso, n) {
+    var p = iso.split('-').map(Number), d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n));
+    return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate());
+  }
+  function bjIso() { return BJ_DAY === 'yesterday' ? isoDayShift(todayISO(), -1) : todayISO(); }
+  function bjGetStore() { var s = getJSON(BJ_STORE_KEY, {}); return (s && typeof s === 'object') ? s : {}; }
+  function bjEntry(iso) { return bjGetStore()[iso] || {}; }
+  function bjPatch(iso, patch) {
+    var s = bjGetStore(), keepFrom = isoDayShift(todayISO(), -14);
+    s[iso] = Object.assign({}, s[iso] || {}, patch);
+    Object.keys(s).forEach(function(k) { if (k < keepFrom) delete s[k]; });
+    setJSON(BJ_STORE_KEY, s);
+  }
+  // Sport du jour : coché dans « Aujourd'hui » CE jour-là (date mémorisée), ou réglé à la main dans la carte.
+  function bjSportDone(iso) {
+    var e = bjEntry(iso);
+    if (typeof e.sport === 'boolean') return e.sport;
+    var w = getJourWeekly(weekStartDateForDate(iso, getSettings().weekStartDay));
+    return (w.sportDates || []).some(function(d, i) { return d === iso && w.sport && w.sport[i]; });
+  }
+  function bjStats(iso) {
+    return bilanWeekStats({ dates: [iso], weekKey: weekStartDateForDate(iso, getSettings().weekStartDay), sportDone: bjSportDone(iso) });
+  }
+  function bilanJourSetSport(on) { bjPatch(bjIso(), { sport: !!on }); renderBilan(); }
+  // Le bilan de la semaine reste toujours à faire (et toujours possible) : la carte du jour le rappelle.
+  function bjWeeklyReminderHtml() {
+    var wk = bilanReferenceWeekKey(), dts = weekDatesForKey(wk), start = formatDDMMYYYY(dts[0]);
+    var sent = getBilanHistory().filter(function(e) { return e.scope !== 'jour' && (e.semaineDu || '') === start; })[0];
+    var out;
+    if (sent) {
+      out = '<div style="background:#E7EEE1;border:1px solid #CFE0C9;border-radius:10px;padding:10px 12px;margin:10px 0;font-size:13px;color:#2C4432;">✅ Ton bilan de la semaine (du ' + start + ' au ' + formatDDMMYYYY(dts[6]) + ') est bien envoyé.</div>';
+    } else {
+      var nb = null; try { nb = bilanSlotNextDate(BILAN_SLOT); } catch (e) {}
+      var when = nb ? ' avant notre bilan du ' + nb.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }) : ' avant notre bilan';
+      out = '<div style="background:#FFF8E1;border:1px solid #E0B84A;border-radius:10px;padding:10px 12px;margin:10px 0;font-size:13px;color:#7A5A00;">⚠️ <b>Ton bilan de la semaine (du ' + start + ' au ' + formatDDMMYYYY(dts[6]) + ') n\'est pas encore envoyé.</b> Il reste à faire' + when + ' : le bilan du jour ne le remplace pas.' +
+        '<div style="margin-top:8px;"><button type="button" class="btn sm" onclick="var e=document.getElementById(\'bilan-semaine-start\');if(e)e.scrollIntoView({behavior:\'smooth\',block:\'start\'})">Aller à mon bilan de la semaine ↓</button></div></div>';
+    }
+    return out;
+  }
+  function bilanJourSetDay(which) { BJ_DAY = which === 'yesterday' ? 'yesterday' : 'today'; renderBilan(); }
+  function bilanJourSetMot(v) {
+    var n = Math.max(1, Math.min(10, parseInt(v, 10) || 5));
+    bjPatch(bjIso(), { motivation: n });
+    var el = document.getElementById('bj-mot-val'); if (el) el.textContent = n + '/10';
+  }
+  function bilanJourSetNote(v) { bjPatch(bjIso(), { note: String(v || '').slice(0, 600) }); }
+  function bilanJourCardHtml() {
+    if (!OPT_BILAN_JOUR) return '';
+    var iso = bjIso(), st = bjStats(iso), e = bjEntry(iso), mot = e.motivation != null ? e.motivation : 5;
+    var seg = function(k, label) { var on = BJ_DAY === k; return '<button type="button" class="btn' + (on ? '' : ' ghost') + ' sm" style="flex:1" onclick="bilanJourSetDay(\'' + k + '\')">' + label + '</button>'; };
+    var out = '<div class="card" id="bilan-jour-card" style="border:2px solid #C97B5A;">';
+    out += '<h3>📅 Mon bilan du jour</h3>';
+    out += '<p class="card-sub">Ta coach a activé le bilan quotidien pour toi. Ce sont les mêmes scores que ton bilan de la semaine, calculés sur une seule journée. Ton bilan de la semaine reste à envoyer comme d\'habitude.</p>';
+    out += bjWeeklyReminderHtml();
+    out += '<div style="display:flex;gap:8px;margin:8px 0 6px;">' + seg('today', 'Aujourd\'hui') + seg('yesterday', 'Hier') + '</div>';
+    out += '<p class="points-note" style="margin-top:0">Journée du ' + formatDDMMYYYY(iso) + (BJ_DAY === 'today' ? ' — pense à tout noter dans ☀️ Aujourd\'hui avant d\'envoyer.' : '.') + '</p>';
+    out += '<label class="toggle-row" style="display:flex;align-items:center;gap:10px;margin:8px 0 4px;font-size:13.5px;cursor:pointer;"><input type="checkbox" ' + (bjSportDone(iso) ? 'checked ' : '') + 'onchange="bilanJourSetSport(this.checked)"> <span>💪 J\'ai fait du sport ce jour-là</span></label>';
+    var rows = [['alimentation', '🥗 Alimentation'], ['sport', '💪 Sport'], ['cardio', '💚 Cohérence cardiaque'], ['sommeil', '😴 Sommeil'], ['hydratation', '💧 Hydratation'], ['vacuum', '🌬️ Vacuum'], ['suivi_plan', '📋 Suivi du plan'], ['moral', '😊 Moral']];
+    rows.forEach(function(r) {
+      var v = st.scores[r[0]];
+      out += '<div style="margin:6px 0;"><div style="display:flex;justify-content:space-between;font-size:13.5px;"><span>' + r[1] + '</span><b>' + v + '/10</b></div>';
+      out += '<div style="height:6px;background:#EFE9D6;border-radius:4px;overflow:hidden;"><div style="height:100%;width:' + (v * 10) + '%;background:#3F5D46;"></div></div>';
+      if (st.details[r[0]]) out += '<div style="font-size:11.5px;color:var(--muted);margin-top:2px;">' + esc(st.details[r[0]]) + '</div>';
+      out += '</div>';
+    });
+    out += '<span class="field-label">🔥 Ma motivation aujourd\'hui : <b id="bj-mot-val">' + mot + '/10</b></span>';
+    out += '<input type="range" min="1" max="10" value="' + mot + '" oninput="bilanJourSetMot(this.value)">';
+    out += '<span class="field-label">Un mot pour ma coach (optionnel)</span>';
+    out += '<textarea id="bj-note" rows="3" maxlength="600" placeholder="Comment s\'est passée ta journée ?" oninput="bilanJourSetNote(this.value)">' + esc(e.note || '') + '</textarea>';
+    out += '<div class="btn-row"><button type="button" class="btn full" id="bj-btn" onclick="bilanJourSend()">' + (e.sentAt ? '🔄 Renvoyer mon bilan du jour' : '✅ Envoyer mon bilan du jour à ma coach') + '</button></div>';
+    out += '<div id="bj-status" style="font-size:12.5px;margin-top:6px;' + (e.sentAt ? 'color:#2C4432;' : 'display:none;') + '">' + (e.sentAt ? '✅ Déjà envoyé le ' + esc(new Date(e.sentAt).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })) + '.' : '') + '</div>';
+    out += '</div>';
+    return out;
+  }
+  function bilanJourSend() {
+    var btn = document.getElementById('bj-btn'), s = document.getElementById('bj-status');
+    function say(msg, ok) { if (s) { s.style.display = 'block'; s.style.color = ok ? '#2C4432' : '#B96A46'; s.textContent = msg; } }
+    if (!fbDB || !CLIENT_CODE) { say('❌ Ton espace n\'est pas encore relié à ta coach — demande-lui de te renvoyer ton lien personnel.', false); return; }
+    var identity = getIdentity();
+    if (!identity.prenom || !identity.email || identity.email.indexOf('@') < 0) {
+      var errEl = document.getElementById('bilan-identity-error'); if (errEl) errEl.style.display = 'block';
+      say('❌ Complète ton prénom et ton e-mail (cadre « Moi », plus bas) avant d\'envoyer.', false); return;
+    }
+    var iso = bjIso(), st = bjStats(iso), e = bjEntry(iso);
+    var scores = Object.assign({}, st.scores); scores.motivation = e.motivation != null ? e.motivation : 5;
+    var comments = {}; if (e.note) comments.moral = e.note;
+    var data = cleanEmpty({
+      nom: (identity.prenom + ' ' + identity.nom).trim(), email: identity.email,
+      date: formatDDMMYYYY(iso), scope: 'jour', jourDate: iso,
+      scores: scores, comments: comments
+    });
+    var payload = Object.assign({}, data, { status: 'nouveau', createdAt: new Date().toISOString() });
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Envoi…'; }
+    fbDB.ref(bilansRecusBasePath() + '/' + CLIENT_CODE + '/' + uid('bilan')).set(payload).then(function() {
+      bjPatch(iso, { sentAt: new Date().toISOString() });
+      var lines = ['Bilan du jour — ' + data.date];
+      Object.keys(scores).forEach(function(k) { lines.push(k + ' : ' + scores[k] + '/10'); });
+      if (e.note) lines.push('Mot : ' + e.note);
+      saveBilanHistoryEntry({ date: data.date, semaineDu: '', scope: 'jour', savedAt: new Date().toISOString(), text: lines.join('\n'), scores: scores, payload: data });
+      renderBilan();
+      var s2 = document.getElementById('bj-status'); if (s2) { s2.style.display = 'block'; s2.style.color = '#2C4432'; s2.textContent = '✅ Envoyé ! Il arrive automatiquement dans le tableau de bord de ta coach.'; }
+    }).catch(function(err) {
+      if (btn) { btn.disabled = false; btn.textContent = '✅ Envoyer mon bilan du jour à ma coach'; }
+      say('❌ Erreur : ' + (err && err.message ? err.message : 'impossible d\'envoyer.'), false);
+    });
+  }
+
   function renderBilan() {
     var el = document.getElementById('view-bilan');
     if (!el) return;
+    bilanJourLoadOpt();
     bilanInitDraft();
     bilanRefreshAutoScores();
     var BSTATS = bilanWeekStats();
@@ -8304,6 +8532,8 @@ window.MEP_BUILD_VERSION = '2026-11-22-foyer1';
     out += '<p class="intro-text">Cette page rassemble automatiquement ce que tu as rempli dans les autres onglets (alimentation, cycle, mantra…). Vérifie, complète les derniers champs, puis envoie-le directement à ta coach, d\'un seul bouton.</p>';
     out += '<div class="disclaimer">📅 <b>Attention :</b> ce bilan est une évaluation hebdomadaire, à envoyer une fois par semaine. Pour suivre ton évolution au jour le jour, va voir l\'onglet ☀️ Aujourd\'hui.</div>';
 
+    out += bilanJourCardHtml();
+    out += '<div id="bilan-semaine-start"></div>';
     var settings = getSettings();
     var thisWeekDates = weekDatesForKey(currentWeekKey());
     out += bilanWeekPickerHtml();
