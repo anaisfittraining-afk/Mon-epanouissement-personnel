@@ -12,13 +12,25 @@ firebase.initializeApp({
 var messaging = firebase.messaging();
 // Les messages sont envoyés en « data » seulement : c'est ici qu'on écrit la notification, avec un texte volontairement
 // neutre (jamais le contenu du message, jamais de donnée de santé : il s'affiche sur l'écran verrouillé).
+// Petit chiffre sur l'icône de l'appli (« badge ») : on compte les messages reçus tant que l'appli n'a pas été ouverte.
+// Le compteur est gardé dans le cache du navigateur (le service worker n'a pas de localStorage) ; l'appli le remet à zéro à l'ouverture.
+function badgeBump() {
+  return caches.open('sfm-badge').then(function(c) {
+    return c.match('badge-count').then(function(r) { return r ? r.text() : '0'; }).then(function(t) {
+      var n = (parseInt(t, 10) || 0) + 1;
+      return c.put('badge-count', new Response(String(n))).then(function() { return n; });
+    });
+  });
+}
 messaging.onBackgroundMessage(function(payload) {
   var d = (payload && payload.data) || {};
   return self.registration.showNotification(d.title || 'Mon espace co-NAÎTRE', {
     body: d.body || 'Tu as un nouveau message.',
-    icon: 'icon-192.png', badge: 'icon-192.png', tag: d.tag || 'message', renotify: true,
+    icon: 'icon-192.png', badge: 'icon-192.png', tag: d.tag || 'message', renotify: true, silent: false, vibrate: [200, 100, 200, 100, 200],
     data: { url: d.url || self.registration.scope }
-  });
+  }).then(function() { return badgeBump(); }).then(function(n) {
+    if (self.navigator && self.navigator.setAppBadge) return self.navigator.setAppBadge(n);
+  }).catch(function() {});
 });
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();

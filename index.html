@@ -30,15 +30,14 @@ window.MEP_BUILD_VERSION = '2026-11-23-photo1';
 <title>🌿 Mon espace co-NAÎTRE</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#3F5D46">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=2">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Mon espace">
 <script>/* Le lien personnel (avec ?client=…) est gardé quand l'appli est installée sur l'écran d'accueil */
-(function(){try{var q=location.search;if(!q||/preview=/.test(q))return;var base=location.pathname.replace(/[^/]*$/,'');var m={name:'Mon espace co-NAÎTRE',short_name:'Mon espace',start_url:location.pathname+q,scope:base,display:'standalone',background_color:'#F7F1E6',theme_color:'#3F5D46',lang:'fr',icons:[{src:new URL('icon-192.png',location.href).href,sizes:'192x192',type:'image/png'},{src:new URL('icon-512.png',location.href).href,sizes:'512x512',type:'image/png',purpose:'any maskable'}]};var l=document.querySelector('link[rel=manifest]');if(l)l.href=URL.createObjectURL(new Blob([JSON.stringify(m)],{type:'application/manifest+json'}));}catch(e){}})();</script>
+(function(){try{var q=location.search;if(!q||/preview=/.test(q))return;var base=location.pathname.replace(/[^/]*$/,'');var m={name:'Mon espace co-NAÎTRE',short_name:'Mon espace',start_url:location.pathname+q,scope:base,display:'standalone',background_color:'#F7F1E6',theme_color:'#3F5D46',lang:'fr',icons:[{src:new URL('icon-192.png?v=2',location.href).href,sizes:'192x192',type:'image/png',purpose:'any'},{src:new URL('icon-512.png?v=2',location.href).href,sizes:'512x512',type:'image/png',purpose:'any'},{src:new URL('icon-512-maskable.png?v=2',location.href).href,sizes:'512x512',type:'image/png',purpose:'maskable'}]};var l=document.querySelector('link[rel=manifest]');if(l)l.href=URL.createObjectURL(new Blob([JSON.stringify(m)],{type:'application/manifest+json'}));}catch(e){}})();</script>
 
 <link rel="icon" id="dynamicFavicon" href="">
-<link rel="apple-touch-icon" id="appleTouchIcon" href="">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=Karla:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Allura&display=swap">
 <style>
@@ -3284,6 +3283,19 @@ window.MEP_BUILD_VERSION = '2026-11-23-photo1';
     } catch (e) {}
   }
   setTimeout(pushTouch, 4000);
+  // Petit chiffre sur l'icône de l'appli : remis à zéro (et notifications de l'écran verrouillé effacées) dès que l'appli est ouverte.
+  function badgeClear() {
+    try {
+      if (PREVIEW_MODE) return;
+      if (navigator.clearAppBadge) navigator.clearAppBadge().catch(function() {});
+      if (window.caches) caches.delete('sfm-badge').catch(function() {});
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) navigator.serviceWorker.getRegistration().then(function(reg) {
+        if (reg && reg.getNotifications) reg.getNotifications().then(function(l) { l.forEach(function(n) { n.close(); }); });
+      }).catch(function() {});
+    } catch (e) {}
+  }
+  setTimeout(badgeClear, 1500);
+  document.addEventListener('visibilitychange', function() { if (document.visibilityState === 'visible') setTimeout(badgeClear, 500); });
   document.addEventListener('visibilitychange', function() { if (document.visibilityState === 'visible') setTimeout(pushTouch, 800); });
   function pushDisable() {
     var tok = ''; try { tok = localStorage.getItem(pushLsKey('push_tok_v1')) || ''; localStorage.removeItem(pushLsKey('push_on_v1')); } catch (e) {}
@@ -5461,7 +5473,6 @@ window.MEP_BUILD_VERSION = '2026-11-23-photo1';
   function updateFavicon(done, total) {
     var href = faviconDataUri(total > 0 && done >= total);
     var icon = document.getElementById('dynamicFavicon'); if (icon) icon.setAttribute('href', href);
-    var touch = document.getElementById('appleTouchIcon'); if (touch) touch.setAttribute('href', href);
   }
   function renderRitualRing(done, total) {
     var r = 22, c = 2 * Math.PI * r;
