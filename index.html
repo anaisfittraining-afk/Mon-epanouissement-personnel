@@ -2165,7 +2165,7 @@ window.MEP_BUILD_VERSION = '2026-11-23-photo1';
       var displayName = (identity.prenom + ' ' + identity.nom).trim();
       // En mode aperçu coach, on ne se signale pas dans le registre (ça fausserait "dernière connexion"
       // et pourrait écraser son nom/e-mail affichés côté tableau de bord avec ceux, vides, de la coach).
-      if (!PREVIEW_MODE) {
+      if (!PREVIEW_MODE && !/^essai_/.test(CLIENT_CODE)) {   // (les essais gratuits ne s'inscrivent pas dans « Mes accès »)
         // On n'inclut le nom/l'e-mail dans cette mise à jour QUE si la cliente les a déjà renseignés
         // (dans "Mes infos") — jamais avec une valeur vide. Sinon, dès la toute première ouverture du
         // lien (avant qu'elle ait rempli quoi que ce soit), ça écrasait par du vide le nom qu'Anaïs
@@ -2604,7 +2604,7 @@ window.MEP_BUILD_VERSION = '2026-11-23-photo1';
         var c0 = accLs(ACC_POL_KEY); S.policy = { exiger: !!(c0 && c0.exiger) };
       } else { accWait('Un instant…'); accStartPolicy(); return; }
     }
-    if (!S.policy.exiger) return checkAccessGateOrig();
+    if (!S.policy.exiger || /^essai_/.test(CLIENT_CODE)) return checkAccessGateOrig();   // essai gratuit : le contrôle de date est fait par le bloc « Essai gratuit » en bas de page
     // Depuis le 05/11/2026 : une fois le code d'accès validé, la cliente passe ENSUITE par son code personnel à 4 chiffres
     // (création au premier passage, vérification aux suivants) — checkAccessGateOrig — au lieu d'entrer directement.
     if (S.ok) { checkAccessGateOrig(); return; }
@@ -2689,6 +2689,7 @@ window.MEP_BUILD_VERSION = '2026-11-23-photo1';
       showPreviewBanner();
       return;
     }
+    if (/^essai_/.test(CLIENT_CODE)) GATE_UNLOCKED = true;   // essai gratuit : pas de code personnel à créer
     var alreadyUnlocked = false;
     try { alreadyUnlocked = sessionStorage.getItem(sessionUnlockKey()) === '1'; } catch (e) {}
     if (alreadyUnlocked || GATE_UNLOCKED) {
@@ -6794,6 +6795,7 @@ window.MEP_BUILD_VERSION = '2026-11-23-photo1';
     try {
       fbDB.ref('epanouissement_global/mon_espace_deblocages/' + CLIENT_CODE).on('value', function(sn) {
         ME_UNLOCK = sn.val() || {};
+        if (/^essai_/.test(CLIENT_CODE)) ME_UNLOCK._all = true;   // essai gratuit : tout est ouvert pour la découverte
         var av = document.querySelector('.view.active');
         if (av && av.id === 'view-monespace') renderMonEspace();
       });
@@ -8878,5 +8880,59 @@ function xvClose() {
 document.addEventListener('keydown', function(e) { if (e.key === 'Escape') xvClose(); });
 </script>
 
+<script>
+/* 🎁 Essai gratuit (calendrier de l'Avent) : si le lien contient un identifiant d'essai (essai_…), on vérifie sur
+   Firebase que l'essai est encore ouvert. Fin de l'essai (ou essai coupé) → écran de fin par-dessus l'appli.
+   Sans identifiant d'essai dans le lien, ce bloc ne fait strictement rien : les clientes ne sont pas concernées. */
+(function () {
+  var m = /[?&](?:client|code)=(essai_[a-z0-9]+)/i.exec(location.search); if (!m) return;
+  var ID = m[1].toLowerCase(), LSK = 'essai_fin_' + ID, NOM = 'co-NAÎTRE', RETOUR = 'https://anaisfittraining-afk.github.io/co-naitre-en-mouvement/avent.html';
+  var fin = 0, ov = null, pill = null, db = null, tick = null;
+  try { fin = parseInt(localStorage.getItem(LSK) || '0', 10) || 0; } catch (e) {}
+  function overlay(titre, txt, withBtn) {
+    if (!ov) {
+      ov = document.createElement('div'); ov.id = 'essaiOverlay';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:#F7F1E6;display:flex;align-items:center;justify-content:center;padding:24px;font-family:Karla,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#2C3A30;text-align:center';
+      document.body.appendChild(ov);
+    }
+    ov.innerHTML = '<div style="max-width:380px"><div style="font-size:44px;margin-bottom:8px">🎁</div><h1 style="font-family:Fraunces,Georgia,serif;font-size:26px;margin:0 0 10px;color:#3F5D46">' + titre + '</h1><p style="margin:0 0 20px;color:#66735F;font-size:16px;line-height:1.5">' + txt + '</p>' +
+      (withBtn ? '<a href="' + RETOUR + '" style="display:block;padding:14px;border-radius:14px;background:#3F5D46;color:#fff;font-weight:700;text-decoration:none;font-size:16px">Retour à mon calendrier</a>' : '') + '</div>';
+  }
+  function hideOverlay() { if (ov) { ov.remove(); ov = null; } }
+  function left(ms) { var h = Math.floor(ms / 3600000), d = Math.floor(h / 24); if (d >= 2) return d + ' jours'; if (h >= 1) return h + ' h ' + ('0' + Math.floor((ms % 3600000) / 60000)).slice(-2); return Math.max(1, Math.ceil(ms / 60000)) + ' min'; }
+  function showPill() {
+    if (!pill) {
+      pill = document.createElement('div');
+      pill.style.cssText = 'position:fixed;top:6px;right:6px;z-index:2147482000;background:rgba(63,93,70,.92);color:#fff;font:700 11.5px Karla,-apple-system,sans-serif;padding:5px 10px;border-radius:999px;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,.18)';
+      document.body.appendChild(pill);
+    }
+    pill.textContent = '🎁 Essai · il reste ' + left(fin - Date.now());
+  }
+  function judge() {
+    if (!fin) return;
+    if (Date.now() >= fin) { if (pill) { pill.remove(); pill = null; } overlay('Ton essai est terminé', 'Merci d’avoir testé ' + NOM + ' ! Retrouve dans ton calendrier comment continuer avec Anaïs.', true); }
+    else { hideOverlay(); showPill(); }
+  }
+  function verify() {
+    if (!db) return;
+    db.ref('epanouissement_global/avent2026/essais/' + ID).once('value').then(function (sn) {
+      var v = sn.val();
+      if (!v || !v.fin) { fin = 1; try { localStorage.removeItem(LSK); } catch (e) {} overlay('Ce lien d’essai n’est pas valable', 'Retourne sur ton calendrier de l’Avent pour activer ton essai.', true); return; }
+      fin = +v.fin; try { localStorage.setItem(LSK, String(fin)); } catch (e) {}
+      judge();
+    }).catch(function () { if (!fin) overlay('Connexion nécessaire', 'Vérifie ta connexion internet pour ouvrir ton essai, puis réessaie.', false); });
+  }
+  function start() {
+    if (typeof firebase === 'undefined' || !firebase.initializeApp) { if (!fin) overlay('Connexion nécessaire', 'Vérifie ta connexion internet pour ouvrir ton essai, puis réessaie.', false); return; }
+    try { var app; try { app = firebase.app('essaiGuard'); } catch (e) { app = firebase.initializeApp({ apiKey: 'AIzaSyC9BmsyRf2MY7qxRO7bL1wRhkJuig0IcLQ', authDomain: 'cooperation-familiale.firebaseapp.com', databaseURL: 'https://cooperation-familiale-default-rtdb.europe-west1.firebasedatabase.app', projectId: 'cooperation-familiale' }, 'essaiGuard'); } db = app.database(); } catch (e) { db = null; }
+    if (!fin) overlay('Un instant…', 'Je vérifie ton essai.', false); else judge();
+    verify();
+    tick = setInterval(judge, 30000);
+    setInterval(verify, 300000);
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { judge(); verify(); } });
+  }
+  if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
+})();
+</script>
 </body>
 </html>
